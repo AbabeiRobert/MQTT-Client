@@ -13,7 +13,7 @@ Aplicația include o **interfață grafică (GUI)** care permite:
 - alegerea ID-ului clientului și a mesajului *Last Will*,
 - vizualizarea în timp real a parametrilor locali și a celor primiți de la alte instanțe ale aplicației.
 
-![Exemplu comunicare MQTT](images/mqtt_exemplu.png)
+![Exemplu comunicare MQTT](images/mqtt_exemplu.jpeg)
 
 ---
 

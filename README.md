@@ -164,7 +164,7 @@ Interfața, realizată cu **Tkinter**, oferă următoarele componente:
 │                                            │
 │   QoS:  ( ) 0     ( ) 1     ( ) 2          │
 │                                            │
-│         [ CONNECT / DISCONNECT ]           │
+│         [ CONNECT / DISCONNECT ]            │
 ├────────────────────────────────────────────┤
 │ 2. Control monitorizare sistem             │
 │                                            │
@@ -174,10 +174,10 @@ Interfața, realizată cu **Tkinter**, oferă următoarele componente:
 │           │ Interval public. │             │
 │           └──────────────────┘             │
 │                                            │
-│         ┌────────────────────────┐         │
-│         │  Jurnal / Evenimente   │         │
-│         │        MQTT            │         │
-│         └────────────────────────┘         │
+│         ┌────────────────────────┐          │
+│         │  Jurnal / Evenimente   │          │
+│         │        MQTT            │          │
+│         └────────────────────────┘          │
 └────────────────────────────────────────────┘
 
 ---

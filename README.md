@@ -173,8 +173,8 @@ Interfața, realizată cu **Tkinter**, oferă următoarele componente:
 │                                            │
 │  ┌────────────────────────┐                │
 │  │  Jurnal / Evenimente   │                │
-│  │  (fereastră permanent │                 │
-│  │   vizibilă)           │                 │
+│  │  (fereastră permanent  │                │
+│  │   vizibilă)            │                │
 │  └────────────────────────┘                │
 └────────────────────────────────────────────┘
 ```

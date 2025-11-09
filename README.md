@@ -137,6 +137,49 @@ Interfața, realizată cu **Tkinter**, oferă următoarele componente:
 | **Log Window** | Evenimente MQTT (connect, publish, ping etc.) |
 | **Received Data Table** | Parametrii primiți de la alte instanțe |
 
+┌────────────────────────────────────────────┐
+│                CLIENT MQTTv5               │
+├────────────────────────────────────────────┤
+│ 1. Conectare Broker                        │
+│                                            │
+│  ┌───────────────┐     ┌──────────────┐    │
+│  │ Broker addr.  │     │    Port      │    │
+│  └───────────────┘     └──────────────┘    │
+│                                            │
+│               ┌──────────────┐             │
+│               │  Keep Alive  │             │
+│               └──────────────┘             │
+│                                            │
+│  ┌──────────────┐     ┌──────────────┐     │
+│  │  Client ID   │     │   Password   │     │
+│  └──────────────┘     └──────────────┘     │
+│                                            │
+│               ┌──────────────┐             │
+│               │  Username    │             │
+│               └──────────────┘             │
+│                                            │
+│           ┌────────────────────┐           │
+│           │  Last Will message │           │
+│           └────────────────────┘           │
+│                                            │
+│   QoS:  ( ) 0     ( ) 1     ( ) 2          │
+│                                            │
+│         [ CONNECT / DISCONNECT ]           │
+├────────────────────────────────────────────┤
+│ 2. Control monitorizare sistem             │
+│                                            │
+│     [ START MONITOR / STOP MONITOR ]       │
+│                                            │
+│           ┌──────────────────┐             │
+│           │ Interval public. │             │
+│           └──────────────────┘             │
+│                                            │
+│         ┌────────────────────────┐         │
+│         │  Jurnal / Evenimente   │         │
+│         │        MQTT            │         │
+│         └────────────────────────┘         │
+└────────────────────────────────────────────┘
+
 ---
 
 ## 7. Structura modulelor

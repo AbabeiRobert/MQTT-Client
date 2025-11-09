@@ -137,6 +137,7 @@ Interfața, realizată cu **Tkinter**, oferă următoarele componente:
 | **Log Window** | Evenimente MQTT (connect, publish, ping etc.) |
 | **Received Data Table** | Parametrii primiți de la alte instanțe |
 
+```
 ┌────────────────────────────────────────────┐
 │                CLIENT MQTTv5               │
 ├────────────────────────────────────────────┤
@@ -179,6 +180,7 @@ Interfața, realizată cu **Tkinter**, oferă următoarele componente:
 │         │        MQTT            │          │
 │         └────────────────────────┘          │
 └────────────────────────────────────────────┘
+```
 
 ---
 

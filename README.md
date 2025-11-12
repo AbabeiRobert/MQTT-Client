@@ -80,14 +80,22 @@ Mecanismul **Keep Alive** menține conexiunea activă între client și broker:
 - Brokerul răspunde cu `PINGRESP`.
 - Dacă brokerul nu primește `PINGREQ` în perioada specificată → conexiunea se închide și brokerul publică *Last Will*.
 
-### 4. Mecanisme **QoS (Quality of Service)**
+### 4. Mecanisme **QoS (Quality of Service)** – flux asincron
+
 Aplicația implementează toate cele trei niveluri QoS definite de MQTT:
 
 | Nivel | Descriere | Caracteristici |
 |-------|------------|----------------|
 | **QoS 0 – At most once** | Mesaj trimis o singură dată fără confirmare | Fără garanție, rapid |
-| **QoS 1 – At least once** | Mesaj retransmis până la confirmare `PUBACK` | Posibilă duplicare |
-| **QoS 2 – Exactly once** | Flux complet: `PUBLISH → PUBREC → PUBREL → PUBCOMP` | Garanție unică livrare |
+| **QoS 1 – At least once** | Mesaj retransmis până la confirmare `PUBACK` | Posibilă duplicare. Mesajele sunt stocate într-un buffer și retransmise periodic până la primirea confirmării; după PUBACK, mesajul este eliminat. Flux asincron, gestionat de thread-uri dedicate. |
+| **QoS 2 – Exactly once** | Flux complet: `PUBLISH → PUBREC → PUBREL → PUBCOMP` | Garanție unică livrare. Starea fiecărui mesaj este urmărită în buffer pentru a garanta livrarea o singură dată. Fluxul este asincron, cu thread-uri separate pentru transmitere și recepție. |
+
+#### Flux asincron QoS 1 și QoS 2
+- Fiecare mesaj publicat este asociat unui `packet_id` și stocat într-un buffer.
+- **TransmitThread**: trimite mesajele PUBLISH din buffer fără a bloca GUI-ul.
+- **ReceiveThread**: procesează răspunsurile brokerului (`PUBACK`, `PUBREC`, `PUBREL`, `PUBCOMP`) și actualizează starea mesajelor.
+- **Cozi thread-safe (Queue)** între transmitere și recepție pentru sincronizare și siguranța datelor.
+- Această arhitectură permite funcționarea paralelă a thread-urilor de monitorizare și comunicație, menținând interfața grafică responsivă.
 
 ### 5. Mecanism **Last Will**
 Mesajul *Last Will* este publicat automat de broker în caz de deconectare neașteptată a clientului, informând ceilalți abonați.
@@ -238,7 +246,143 @@ Aplicația este modulară, separând clar logica de comunicație, GUI-ul și par
 
 ---
 
-## 9. Concluzii
+## 9. Proiectarea aplicației
+
+Aplicația este proiectată conform principiilor **programării orientate pe obiecte (OOP)** și utilizează un model **multi-threaded** pentru a separa sarcinile critice: comunicația de rețea, colectarea datelor de sistem, actualizarea interfeței grafice și menținerea conexiunii active cu brokerul.
+
+---
+
+### 9.1. Arhitectura pe thread-uri
+
+Pentru a asigura funcționarea fluentă și responsivă a aplicației, sunt folosite **cinci fire de execuție principale**, fiecare având roluri bine definite:
+
+| Thread | Componentă | Responsabilități principale |
+|---------|-------------|-----------------------------|
+| **Thread principal (UI Thread)** | `gui.py` | Inițializează și rulează bucla principală Tkinter. Gestionează interfața, inputul utilizatorului și actualizarea componentelor vizuale. |
+| **TransmitThread (MQTT)** | `client.py` | Trimite mesajele PUBLISH din buffer pentru QoS 1 și QoS 2 fără a bloca GUI-ul. |
+| **ReceiveThread (MQTT)** | `client.py` | Procesează răspunsurile brokerului (`PUBACK`, `PUBREC`, `PUBREL`, `PUBCOMP`) și actualizează starea mesajelor QoS 1 și QoS 2. |
+| **Thread de monitorizare sistem** | `monitor.py` | Colectează periodic parametrii sistemului (CPU, RAM, temperatură, uptime) și îi transmite către clientul MQTT pentru publicare. |
+| **Thread Keep Alive / PING** | `client.py` | Trimite periodic pachete `PINGREQ` pentru a menține conexiunea activă. Monitorizează timpul de inactivitate și inițiază reconectarea automată la nevoie. |
+
+**Comunicarea între thread-uri** se realizează prin:
+- **Queue-uri (thread-safe)** pentru trimiterea mesajelor între GUI și clientul MQTT și între transmit/receive threads.
+- **Evenimente (`threading.Event`)** pentru controlul pornirii/opriri monitorizării.
+- **Lock-uri (`threading.Lock`)** pentru acces sincronizat la socket.
+
+---
+
+### 9.2. Clase principale (OOP Design)
+
+Aplicația este structurată pe clase modulare, care separă clar logica de comunicație, procesare și interfață.
+
+#### 1. `MQTTClient`
+**Rol:** reprezintă clientul MQTT propriu-zis și gestionează întregul ciclu de viață al conexiunii.
+
+**Responsabilități:**
+- Stabilirea conexiunii TCP cu brokerul.
+- Trimiterea pachetelor `CONNECT`, `PUBLISH`, `SUBSCRIBE`, `PINGREQ`, `DISCONNECT`.
+- Gestionarea autentificării și a mesajului *Last Will*.
+- Implementarea mecanismelor QoS 0–2.
+- Recepția și interpretarea pachetelor de răspuns (`CONNACK`, `PUBACK`, etc.).
+- Menținerea conexiunii prin *Keep Alive* și reconectare automată.
+
+**Atribute principale:**
+- `broker_host`, `broker_port`, `client_id`
+- `socket`
+- `keep_alive`, `last_will`, `username`, `password`
+- `connected`
+- `protocol_encoder`, `protocol_decoder`
+
+**Metode cheie:**
+- `connect`
+- `disconnect`
+- `publish`
+- `subscribe`
+- `loop_receive`
+- `send_ping`
+
+---
+
+#### 2. `ProtocolEncoder`
+**Rol:** se ocupă cu **generarea pachetelor binare MQTT v5** conform specificației.
+
+**Responsabilități:**
+- Construcția pachetelor pentru fiecare tip de mesaj (`CONNECT`, `PUBLISH`, `SUBSCRIBE`, etc.).
+- Calculul câmpului **Remaining Length**.
+- Inserarea corectă a câmpurilor opționale și proprietăților MQTT v5.
+- Conversia datelor în format binar conform protocolului.
+
+**Metode cheie:**
+- `encode_connect`
+- `encode_publish`
+- `encode_subscribe`
+- `encode_pingreq`
+- `encode_disconnect`
+
+---
+
+#### 3. `ProtocolDecoder`
+**Rol:** interpretează pachetele binare primite de la broker și le convertește în structuri ușor de procesat de către client.
+
+**Responsabilități:**
+- Identificarea tipului de pachet (prin *Fixed Header*).
+- Extracția câmpurilor din *Variable Header* și *Payload*.
+- Validarea pachetelor conform specificației MQTT v5.
+- Returnarea rezultatelor sub formă de dicționare Python.
+
+**Metode cheie:**
+- `decode_connack`
+- `decode_puback`
+- `decode_suback`
+- `decode_pingresp`
+- `decode_disconnect`
+
+---
+
+#### 4. `SystemMonitor`
+**Rol:** colectează și furnizează informații despre starea sistemului local.
+
+**Responsabilități:**
+- Citirea în timp real a valorilor de CPU, memorie, temperatură și uptime.
+- Formatarea datelor într-un obiect JSON pentru publicare.
+- Rularea periodică într-un thread separat.
+- Transmiterea datelor către `MQTTClient` pentru publicare.
+
+**Metode cheie:**
+- `get_cpu_usage`
+- `get_memory_usage`
+- `get_temperature`
+- `collect_metrics`
+- `run`
+
+---
+
+#### 5. `MQTTGui`
+**Rol:** reprezintă interfața grafică principală a aplicației, construită cu Tkinter.
+
+**Responsabilități:**
+- Colectarea datelor de configurare de la utilizator (broker, port, ID, QoS etc.).
+- Inițierea și controlul conexiunii MQTT.
+- Controlul pornirii/opririi monitorizării sistemului.
+- Afișarea evenimentelor și mesajelor primite în jurnalul grafic.
+- Actualizarea în timp real a tabelei cu datele primite.
+
+**Atribute principale:**
+- câmpuri de input (Entry, Combobox, Radiobutton)
+- butoane (Connect, Start Monitor, Stop Monitor)
+- ferestre de log și tabelă cu date
+
+**Metode cheie:**
+- `on_connect_click`
+- `on_disconnect_click`
+- `on_start_monitor`
+- `on_stop_monitor`
+- `update_log`
+- `display_data`
+
+---
+
+## 10. Concluzii
 Proiectul demonstrează posibilitatea implementării unui **client MQTT v5 complet funcțional**, utilizând doar biblioteca `socket`.
 
 **Rezultate obținute:**
@@ -250,7 +394,7 @@ Proiectul demonstrează posibilitatea implementării unui **client MQTT v5 compl
 
 ---
 
-## 10. Bibliografie
+## 11. Bibliografie
 1. [**MQTT Version 5.0 Specification**, OASIS Standard, 2019](https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html)  
 2. [**HiveMQ – MQTT Essentials (Part 5–10)**](https://www.hivemq.com/mqtt-essentials/)  
 3. [**IBM Developer – MQTT v5 Explained**](https://developer.ibm.com/articles/iot-mqtt-why-good-for-iot/)  

@@ -382,7 +382,217 @@ Aplicația este structurată pe clase modulare, care separă clar logica de comu
 
 ---
 
-## 10. Concluzii
+# 10. Codificarea pachetelor MQTT v5
+
+Această secțiune descrie modul în care sunt codificate pachetele MQTT v5 în format binar. Pentru fiecare tip de pachet sunt prezentate:
+
+* structura conform specificației oficiale OASIS;
+* octeții fixați (Fixed Header);
+* zona variabilă (Variable Header și Payload);
+* un comentariu unde trebuie inserată imaginea din documentația oficială.
+
+---
+
+## 10.1. Pachet CONNECT
+
+![Connect](images/connect_packet.png)
+
+### Fixed Header
+
+| Octet   | Descriere             | Valoare  |
+| ------- | --------------------- | -------- |
+| byte 1  | Tip pachet + flag-uri | `0x10`   |
+| byte 2+ | Remaining Length      | variabil |
+
+### Variable Header
+
+| Câmp              | Octeți | Status                                          |
+| ----------------- | ------ | ----------------------------------------------- |
+| Protocol Name     | 2 + 4  | fix: "MQTT"                                     |
+| Protocol Version  | 1      | fix: `0x05`                                     |
+| Connect Flags     | 1      | variabil                                        |
+| Keep Alive        | 2      | numărul de secunde până la expirarea conexiunii |
+| Properties Length | 1–4    | variabil                                        |
+
+### Payload
+
+Client ID, Will Properties, Will Payload, Username, Password.
+
+---
+
+## 10.2. Pachet CONNACK
+
+![Connack](images/connack.png)
+
+### Fixed Header
+
+| Octet  | Descriere             | Valoare  |
+| ------ | --------------------- | -------- |
+| byte 1 | Tip pachet + flag-uri | `0x20`   |
+| byte 2 | Remaining Length      | variabil |
+
+### Variable Header
+
+| Câmp                      | Octeți | Descriere               |
+| ------------------------- | ------ | ----------------------- |
+| Connect Acknowledge Flags | 1      | include Session Present |
+| Reason Code               | 1      | cod rezultat conectare  |
+| Properties Length         | 1–4    | variabil                |
+
+### Reason Code – valori tipice
+
+| Cod    | Semnificație                  |
+| ------ | ----------------------------- |
+| `0x00` | Success                       |
+| `0x80` | Malformed Packet              |
+| `0x81` | Protocol Error                |
+| `0x82` | Implementation Specific Error |
+| `0x84` | Unsupported Protocol Version  |
+| `0x85` | Client Identifier not valid   |
+| `0x86` | Bad Username or Password      |
+| `0x87` | Not authorized                |
+| `0x89` | Server busy                   |
+| `0x9C` | Use another server            |
+
+---
+
+## 10.3. Pachet PUBLISH
+
+![Publish](images/publish.png)
+
+### Fixed Header
+
+| Bit / Octet      | Descriere  | Valoare  |
+| ---------------- | ---------- | -------- |
+| Bits 7–4         | Tip pachet | `0011`   |
+| Bit 3            | DUP flag   | variabil |
+| Bits 2–1         | QoS        | variabil |
+| Bit 0            | RETAIN     | variabil |
+| Remaining Length | 1–4 octeți | variabil |
+
+### Variable Header
+
+| Câmp              | Octeți | Status         |
+| ----------------- | ------ | -------------- |
+| Topic Name        | 2 + N  | variabil       |
+| Packet Identifier | 2      | pentru QoS 1/2 |
+| Properties Length | 1–4    | variabil       |
+
+### Payload
+
+Conținutul efectiv al mesajului.
+
+---
+
+## 10.4. Pachet PUBACK (QoS 1)
+
+![Connect](images/puback.png)
+
+### Fixed Header
+
+| Octet  | Valoare          |
+| ------ | ---------------- |
+| byte 1 | `0x40`           |
+| byte 2 | Remaining Length |
+
+### Variable Header
+
+| Octeți | Conținut          |
+| ------ | ----------------- |
+| 2      | Packet Identifier |
+| 1      | Reason Code       |
+| 1–4    | Properties Length |
+
+---
+
+## 10.5. Pachetele QoS 2: PUBREC, PUBREL, PUBCOMP
+
+### PUBREC
+
+* Fixed Header: `0x50`
+* Variable Header: Packet ID, Reason Code, Properties Length
+
+### PUBREL
+
+* Fixed Header: `0x62` (flag fix 0010)
+* Variable Header identic
+
+### PUBCOMP
+
+* Fixed Header: `0x70`
+* Variable Header identic
+
+---
+
+## 10.6. Pachet SUBSCRIBE
+
+![Connect](images/subsisuback.png)
+
+### Fixed Header
+
+| Octet   | Valoare          |
+| ------- | ---------------- |
+| byte 1  | `0x82`           |
+| byte 2+ | Remaining Length |
+
+### Variable Header
+
+| Octeți | Conținut          |
+| ------ | ----------------- |
+| 2      | Packet Identifier |
+| 1–4    | Properties Length |
+
+### Payload
+
+Topic Filter + Subscription Options.
+
+---
+
+## 10.7. Pachet SUBACK
+
+### Fixed Header
+
+`0x90`
+
+### Variable Header
+
+* Packet Identifier
+* Properties Length
+
+### Payload
+
+* Reason Codes
+
+---
+
+## 10.8. Pachet PINGREQ
+
+`0xC0 0x00`
+
+---
+
+## 10.9. Pachet PINGRESP
+
+`0xD0 0x00`
+
+---
+
+## 10.10. Pachet DISCONNECT
+
+### Fixed Header
+
+| Octet  | Valoare          |
+| ------ | ---------------- |
+| byte 1 | `0xE0`           |
+| byte 2 | Remaining Length |
+
+### Variable Header
+
+Reason Code (opțional), Properties Length.
+
+---
+
+## 11. Concluzii
 Proiectul demonstrează posibilitatea implementării unui **client MQTT v5 complet funcțional**, utilizând doar biblioteca `socket`.
 
 **Rezultate obținute:**
@@ -394,9 +604,11 @@ Proiectul demonstrează posibilitatea implementării unui **client MQTT v5 compl
 
 ---
 
-## 11. Bibliografie
+## 12. Bibliografie
 1. [**MQTT Version 5.0 Specification**, OASIS Standard, 2019](https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html)  
 2. [**HiveMQ – MQTT Essentials (Part 5–10)**](https://www.hivemq.com/mqtt-essentials/)  
 3. [**IBM Developer – MQTT v5 Explained**](https://developer.ibm.com/articles/iot-mqtt-why-good-for-iot/)  
 4. [**RFC 6455 – Transmission Control Protocol (TCP)**](https://datatracker.ietf.org/doc/html/rfc6455)  
 5. [**Python socket Module – Official Documentation**](https://docs.python.org/3/library/socket.html)
+
+---

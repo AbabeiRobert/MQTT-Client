@@ -1,20 +1,32 @@
+# main.py
 from client import MQTTClient
-import time
+import getpass  # Pentru a ascunde parola când o scrii
 
-mode=""
-while mode != "subscriber" and mode!= "publisher":
+mode = ""
+while mode not in ("subscriber", "publisher"):
     mode = input("Mode (publisher/subscriber): ").strip().lower()
+
 host = input("Broker host (default localhost): ") or "localhost"
-port = int(input("Broker port (default 1883): ") or 1883)
+port_input = input("Broker port (default 1883): ")
+port = int(port_input) if port_input else 1883
 client_id = input("Client ID: ") or "client_test"
 
-mqtt = MQTTClient(host, port, client_id)
+use_auth = input("Folosești user/parolă? (y/n): ").lower()
+user = None
+pwd = None
+
+if use_auth == 'y':
+    user = input("Username: ")
+    # getpass ascunde caracterele tastate in terminal
+    pwd = getpass.getpass("Password: ")
+
+mqtt = MQTTClient(host, port, client_id, username=user, password=pwd)
 
 try:
     mqtt.connect()
-    print(f"Conectat la {host}:{port}")
 except Exception as e:
-    print(f"Eroare conectare: {e}")
+    print(f"\nCRITIC: Nu s-a putut realiza conexiunea!")
+    print(f"Cauza: {e}")
     exit()
 
 if mode == 'subscriber':
@@ -28,24 +40,27 @@ if mode == 'subscriber':
     opt = input("Alege (1-4): ").strip()
 
     if opt == "2":
-        # + este wildcard care va fi inlocuit de client_id
         topic = "sistem/+/cpu"
     elif opt == "3":
         topic = "sistem/+/mem"
     elif opt == "4":
         topic = "sistem/+/temp"
     else:
-        # # este wildcard pentru tot restul caii
         topic = "sistem/#"
 
     mqtt.run_subscriber(topic)
 
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
-
 else:
-    #publisher trimite automat la toate topicurile
+    print("\nAlege QoS pentru fiecare metrică.")
+
+    def ask_qos(name):
+        q = ""
+        while q not in ("0", "1", "2"):
+            q = input(f"QoS pentru {name} (0/1/2): ").strip()
+        return int(q)
+
+    mqtt.qos_cpu = ask_qos("CPU")
+    mqtt.qos_ram = ask_qos("RAM")
+    mqtt.qos_temp = ask_qos("Temperatură")
+
     mqtt.run_publisher()

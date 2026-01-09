@@ -90,12 +90,20 @@ Aplicația implementează toate cele trei niveluri QoS definite de MQTT:
 | **QoS 1 – At least once** | Mesaj retransmis până la confirmare `PUBACK` | Posibilă duplicare. Mesajele sunt stocate într-un buffer și retransmise periodic până la primirea confirmării; după PUBACK, mesajul este eliminat. Flux asincron, gestionat de thread-uri dedicate. |
 | **QoS 2 – Exactly once** | Flux complet: `PUBLISH → PUBREC → PUBREL → PUBCOMP` | Garanție unică livrare. Starea fiecărui mesaj este urmărită în buffer pentru a garanta livrarea o singură dată. Fluxul este asincron, cu thread-uri separate pentru transmitere și recepție. |
 
-#### Flux asincron QoS 1 și QoS 2
-- Fiecare mesaj publicat este asociat unui `packet_id` și stocat într-un buffer.
-- **TransmitThread**: trimite mesajele PUBLISH din buffer fără a bloca GUI-ul.
-- **ReceiveThread**: procesează răspunsurile brokerului (`PUBACK`, `PUBREC`, `PUBREL`, `PUBCOMP`) și actualizează starea mesajelor.
-- **Cozi thread-safe (Queue)** între transmitere și recepție pentru sincronizare și siguranța datelor.
-- Această arhitectură permite funcționarea paralelă a thread-urilor de monitorizare și comunicație, menținând interfața grafică responsivă.
+### Mecanisme QoS 1 și QoS 2 – implementare bazată pe thread-uri efemere
+
+**Thread-uri temporare (per mesaj):**  
+Pentru fiecare mesaj publicat cu un nivel de **QoS > 0**, aplicația lansează un thread temporar dedicat (`_publish_sync_logic`).
+
+**Retransmisie locală:**  
+Acest thread trimite pachetul MQTT și așteaptă confirmarea corespunzătoare (`PUBACK` pentru QoS 1 sau `PUBREC` pentru QoS 2) într-o buclă locală.  
+Dacă confirmarea nu este recepționată în intervalul de timp stabilit, thread-ul retransmite automat pachetul.
+
+**Cozi thread-safe (`Queue`):**  
+Cozi thread-safe sunt utilizate exclusiv pentru transmiterea confirmărilor (ACK-uri) primite de **ReceiveThread** către thread-urile temporare de publicare care le așteaptă.
+
+Această arhitectură de tip din perspectiva thread-ului principal asigură faptul că interfața grafică rămâne complet responsivă, indiferent de latența rețelei sau de numărul de retransmisii necesare.
+
 
 ### 5. Mecanism **Last Will**
 Mesajul *Last Will* este publicat automat de broker în caz de deconectare neașteptată a clientului, informând ceilalți abonați.
@@ -115,12 +123,9 @@ Clientul colectează și publică periodic parametrii sistemului:
 Publicarea se face la fiecare **5 secunde** în format JSON:
 
 ```json
-{
-  "cpu": 47.5,
-  "ram": 62.1,
-  "temperatura": 54.3,
-  "uptime": 13425
-}
+{"cpu": 47.5}
+{"ram": 62.1}
+{"temperatura": 54.3}
 ```
 
 QoS-ul se poate selecta din interfață.
@@ -211,7 +216,7 @@ Aplicația este modulară, separând clar logica de comunicație, GUI-ul și par
 - Respectă structura oficială MQTT, incluzând calculul *Remaining Length*.
 
 ### `monitor.py`
-- Colectează date despre sistem (CPU, RAM, temperatură, uptime).
+- Colectează date despre sistem (CPU, RAM, temperatură).
 - Utilizează biblioteci standard (`os`, `psutil`, `platform`).
 - Trimite valorile către `client.py` pentru publicare periodică.
 
@@ -254,15 +259,16 @@ Aplicația este proiectată conform principiilor **programării orientate pe obi
 
 ### 9.1. Arhitectura pe thread-uri
 
-Pentru a asigura funcționarea fluentă și responsivă a aplicației, sunt folosite **cinci fire de execuție principale**, fiecare având roluri bine definite:
+Pentru a asigura funcționarea fluentă și responsivă a aplicației, sunt utilizate **fire de execuție specializate**, fiecare având responsabilități bine definite.
 
 | Thread | Componentă | Responsabilități principale |
-|---------|-------------|-----------------------------|
-| **Thread principal (UI Thread)** | `gui.py` | Inițializează și rulează bucla principală Tkinter. Gestionează interfața, inputul utilizatorului și actualizarea componentelor vizuale. |
-| **TransmitThread (MQTT)** | `client.py` | Trimite mesajele PUBLISH din buffer pentru QoS 1 și QoS 2 fără a bloca GUI-ul. |
-| **ReceiveThread (MQTT)** | `client.py` | Procesează răspunsurile brokerului (`PUBACK`, `PUBREC`, `PUBREL`, `PUBCOMP`) și actualizează starea mesajelor QoS 1 și QoS 2. |
-| **Thread de monitorizare sistem** | `monitor.py` | Colectează periodic parametrii sistemului (CPU, RAM, temperatură, uptime) și îi transmite către clientul MQTT pentru publicare. |
-| **Thread Keep Alive / PING** | `client.py` | Trimite periodic pachete `PINGREQ` pentru a menține conexiunea activă. Monitorizează timpul de inactivitate și inițiază reconectarea automată la nevoie. |
+|------|-----------|-----------------------------|
+| **Thread principal (UI Thread)** | `gui.py` | Inițializează și rulează bucla principală Tkinter. Gestionează interfața, inputul utilizatorului și actualizarea componentelor vizuale prin mecanisme de polling pe cozi. |
+| **Thread-uri de publicare (temporare)** | `client.py` | Create dinamic pentru fiecare mesaj publicat cu **QoS 1** sau **QoS 2**. Gestionează trimiterea mesajului, așteptarea confirmării (ACK) și retransmisia acestuia, după care se închid. |
+| **ReceiveThread (Loop Receive)** | `client.py` | Ascultă permanent pe socket. Procesează răspunsurile brokerului și distribuie ACK-urile în cozile specifice pentru a debloca thread-urile de publicare. |
+| **Thread de monitorizare sistem** | `monitor.py` | Colectează periodic parametrii sistemului (CPU, RAM, temperatură) și inițiază publicarea acestora. |
+| **Thread Keep Alive / PING** | `client.py` | Trimite periodic pachete `PINGREQ` pentru a menține conexiunea activă cu brokerul. |
+
 
 **Comunicarea între thread-uri** se realizează prin:
 - **Queue-uri (thread-safe)** pentru trimiterea mesajelor între GUI și clientul MQTT și între transmit/receive threads.

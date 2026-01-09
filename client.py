@@ -3,19 +3,25 @@ import socket
 import threading
 import time
 import queue
-import json
+
 from protocol import ProtocolDecoder, ProtocolEncoder, recv_all
 from monitor import SystemMonitor
 
 
 class MQTTClient:
-    def __init__(self, host, port, client_id, username=None, password=None, keep_alive=60):
+    def __init__(self, host, port, client_id, username=None, password=None, keep_alive=60,
+                 will_topic=None, will_message=None, will_qos=0, will_retain=False):
         self.host = host
         self.port = port
         self.client_id = client_id
 
         self.username = username
         self.password = password
+        
+        self.will_topic = will_topic
+        self.will_message = will_message
+        self.will_qos = will_qos
+        self.will_retain = will_retain
 
         self.packet_id_counter = 1
         self.keep_alive = keep_alive
@@ -28,33 +34,38 @@ class MQTTClient:
         self.sock = None
         self.connected = False
 
-        # Cozi pentru ACK-uri
+#lock-uri pentru thread-safety
+        self.sock_lock = threading.Lock()
+        self.pid_lock = threading.Lock()
+
+#cozi pentru comunicare intre thread-uri (ACK-uri)
         self.puback_queue = queue.Queue()
         self.suback_queue = queue.Queue()
-
-        # QoS2
         self.qos2_pubrec_queue = queue.Queue()
         self.qos2_pubcomp_queue = queue.Queue()
 
-    # ======================================================
-    # CONNECT
-    # ======================================================
     def connect(self):
         self.sock = socket.socket()
+#initiere conexiune TCP (Three-way handshake) catre broker
         self.sock.connect((self.host, self.port))
 
         print(f"Trimit pachet CONNECT pentru {self.client_id} (User: {self.username})...")
-
+#codificam datele conform protocolului
         pkt = ProtocolEncoder.encode_connect(
             client_id=self.client_id,
             keep_alive=self.keep_alive,
             username=self.username,
-            password=self.password
+            password=self.password,
+            will_topic=self.will_topic,
+            will_message=self.will_message,
+            will_qos=self.will_qos,
+            will_retain=self.will_retain
         )
+#trimite fluxul de octeti (stream-ul) complet al pachetului CONNECT
+        with self.sock_lock:
+            self.sock.sendall(pkt)
 
-        self.sock.sendall(pkt)
-
-        # Asteptam CONNACK
+# asteptam CONNACK de la broker
         flags, rc = ProtocolDecoder.decode_connack(self.sock)
 
         if rc == 0:
@@ -67,74 +78,138 @@ class MQTTClient:
             raise Exception(f"CONNACK error code: {hex(rc)}")
 
         self.connected = True
-
-        # Pornim thread-urile de ascultare si ping
+# pornim thread-urile de ascultare si ping
+# thread principal de receptie MQTT: citeste, decodeaza si proceseaza toate pachetele primite
         threading.Thread(target=self.loop_receive, daemon=True).start()
+# mentine conexiunea MQTT activa prin trimiterea periodica de pingreq
         threading.Thread(target=self.ping_loop, daemon=True).start()
+
+    def disconnect(self):
+        if self.connected:
+            try:
+                # Trimitem pachet DISCONNECT
+                print(f"Deconectare graceful pentru {self.client_id}...")
+                with self.sock_lock:
+                    self.sock.sendall(ProtocolEncoder.encode_disconnect())
+                self.connected = False
+                self.sock.close()
+            except Exception as e:
+                print(f"Eroare la disconnect: {e}")
 
     def ping_loop(self):
         while self.connected:
             time.sleep(self.keep_alive // 2)
             try:
-                self.sock.sendall(b"\xC0\x00")  # PINGREQ
+#PINGREQ folosind encoder-ul dedicat
+                with self.sock_lock:
+                    self.sock.sendall(ProtocolEncoder.encode_pingreq())
             except:
                 self.connected = False
 
     # ======================================================
-    # PUBLISH
+    # PUBLISH (Asincron)
     # ======================================================
     def publish(self, topic, message, qos=0):
-        if qos == 0:
-            pkt = ProtocolEncoder.encode_publish(topic, message)
-            self.sock.sendall(pkt)
+#lansam publicarea pe un thread separat pentru a nu bloca GUI-ul sau monitorizarea
+        threading.Thread(target=self._publish_sync_logic, args=(topic, message, qos), daemon=True).start()
 
-        elif qos == 1:
-            pid = self.next_pid()
-            pkt = ProtocolEncoder.encode_publish_qos1(topic, message, pid)
-            self.sock.sendall(pkt)
-            ack_pid = self.puback_queue.get()
-            # print(f"[PUBACK] {ack_pid}")
+    def _publish_sync_logic(self, topic, message, qos):
+        try:
+            if qos == 0:
+                pkt = ProtocolEncoder.encode_publish(topic, message)
+                with self.sock_lock:
+                    self.sock.sendall(pkt)
 
-        elif qos == 2:
-            pid = self.next_pid()
-            pkt = ProtocolEncoder.encode_publish_qos2(topic, message, pid)
-            self.sock.sendall(pkt)
+            elif qos == 1:
+                pid = self.next_pid()
+                pkt = ProtocolEncoder.encode_publish_qos1(topic, message, pid)
+                
+                #retransmisie simpla la timeout
+                while self.connected:
+                    with self.sock_lock:
+                        self.sock.sendall(pkt)
+                    try:
+                        #asteptam 2 secunde CONFIRMAREA
+                        ack_pid = self.puback_queue.get(timeout=2.0)
+                        if ack_pid == pid:
+                            break
+                        else:
+                            #daca am primit alt PID il ignoram aici
+                            pass
+                    except queue.Empty:
+                        print(f"[RETRANSMISIE QoS1] Packet ID {pid} nu a primit ACK. Retrimit...")
+                        continue
 
-            rec_pid = self.qos2_pubrec_queue.get()
-            # print(f"[PUBREC] {rec_pid}")
+            elif qos == 2:
+                pid = self.next_pid()
+                pkt = ProtocolEncoder.encode_publish_qos2(topic, message, pid)
+                
+                # Faza 1: PUBLISH -> Asteptare PUBREC
+                while self.connected:
+                    with self.sock_lock:
+                        self.sock.sendall(pkt)
+                    try:
+                        # Asteptam sincron pachetul PUBREC. 
+                        # Blocant DOAR in acest thread secundar.
+                        rec_pid = self.qos2_pubrec_queue.get(timeout=2.0)
+                        if rec_pid == pid:
+                            break
+                    except queue.Empty:
+                        print(f"[RETRANSMISIE QoS2] Packet ID {pid} (PUBLISH) nu a primit PUBREC. Retrimit...")
+                        continue
 
-            self.sock.sendall(ProtocolEncoder.encode_pubrel(pid))
+                # Faza 2: Trimite PUBREL -> Asteptare PUBCOMP
+                pubrel_pkt = ProtocolEncoder.encode_pubrel(pid)
+                while self.connected:
+                    with self.sock_lock:
+                        self.sock.sendall(pubrel_pkt)
+                    try:
+                        comp_pid = self.qos2_pubcomp_queue.get(timeout=2.0)
+                        if comp_pid == pid:
+                            break
+                    except queue.Empty:
+                        print(f"[RETRANSMISIE QoS2] Packet ID {pid} (PUBREL) nu a primit PUBCOMP. Retrimit...")
+                        continue
 
-            comp_pid = self.qos2_pubcomp_queue.get()
-            # print(f"[PUBCOMP] {comp_pid}")
+        except Exception as e:
+            print(f"Eroare in thread-ul de publish: {e}")
 
     def next_pid(self):
-        pid = self.packet_id_counter
-        self.packet_id_counter += 1
-        if self.packet_id_counter > 65535:
-            self.packet_id_counter = 1
-        return pid
+        with self.pid_lock:
+            pid = self.packet_id_counter
+            self.packet_id_counter += 1
+            if self.packet_id_counter > 65535:
+                self.packet_id_counter = 1
+            return pid
 
-    # ======================================================
-    # SUBSCRIBE
-    # ======================================================
     def subscribe(self, topic, packet_id=1):
-        pkt = ProtocolEncoder.encode_subscribe(packet_id, topic)
-        self.sock.sendall(pkt)
-        ack = self.suback_queue.get()
-        print(f"[SUBACK primit] Abonat la {topic}")
+        # Lansam abonarea pe un thread separat pentru a nu bloca GUI-ul
+        threading.Thread(target=self._subscribe_sync_logic, args=(topic, packet_id), daemon=True).start()
 
-    # ======================================================
-    # RECEIVE LOOP
-    # ======================================================
+    def _subscribe_sync_logic(self, topic, packet_id):
+        try:
+            pkt = ProtocolEncoder.encode_subscribe(packet_id, topic)
+            with self.sock_lock:
+                self.sock.sendall(pkt)
+            # Asteptam SUBACK cu timeout
+            try:
+                ack = self.suback_queue.get(timeout=5.0)
+                print(f"[SUBACK primit] Abonat la {topic}")
+            except queue.Empty:
+                print(f"[TIMEOUT] Nu s-a primit SUBACK pentru {topic}")
+        except Exception as e:
+            print(f"Eroare in thread-ul de subscribe: {e}")
+
+#thread principal de receptie MQTT
+#citeste pachetele brute de pe socket, le decodeaza conform MQTT v5 si directioneaza fiecare pachet catre logica corespunzatoare
     def loop_receive(self):
         while self.connected:
             try:
-                # Citim primul octet
+                # Decodarea lungimii variabile (Remaining Length) conform specificatiei MQTT v5
+                # Algoritm standard pentru decodare VarInt (Base 128)
+                # Referinta: https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901011
                 first = recv_all(self.sock, 1)
                 packet_type = first[0] >> 4
-
-                # Remaining length
                 remaining = 0
                 mul = 1
                 while True:
@@ -144,9 +219,9 @@ class MQTTClient:
                         break
                     mul *= 128
 
-                # Citim corpul pachetului
+#citim corpul pachetului
                 body = recv_all(self.sock, remaining)
-
+#in functie de tipul pachetului folosim metoda corespunzatoare de decodare
                 if packet_type == 3:  # PUBLISH primit de la broker
                     self._handle_publish(first[0], body)
 
@@ -179,10 +254,10 @@ class MQTTClient:
                     self.connected = False
                 break
 
-    # ======================================================
-    # PUBLISH HANDLER
-    # ======================================================
+#logica de procesare a pachetelor PUBLISH conform standardului MQTT v5
+#a fost preluata si adaptata din implementari uzuale de pe internet
     def _handle_publish(self, first_byte, body):
+#extragem qos din primul octet
         qos = (first_byte & 0b0110) >> 1
 
         tlen = int.from_bytes(body[:2], 'big')
@@ -195,13 +270,23 @@ class MQTTClient:
             packet_id = int.from_bytes(body[idx:idx + 2], 'big')
             idx += 2
 
-        if idx < len(body):
-            prop_len = body[idx]
-            idx += 1 + prop_len
-
+#decodam VarInt pentru Property Length
+        prop_len = 0
+        mul = 1
+        while idx < len(body):
+            b = body[idx]
+            idx += 1
+            prop_len += (b & 127) * mul
+            if (b & 128) == 0:
+                break
+            mul *= 128
+        
+#sarim peste proprietati
+        idx += prop_len
+#extragem payload-ul
         payload = body[idx:].decode(errors='ignore')
 
-        # Trimitem ACK-urile necesare
+#trimitem ACK-urile necesare
         if qos == 1:
             self.sock.sendall(ProtocolEncoder.encode_puback(packet_id))
         elif qos == 2:
@@ -209,43 +294,3 @@ class MQTTClient:
 
         print(f"\n[MESAJ NOU] Topic: {topic} | Data: {payload}")
 
-    # ======================================================
-    # CONSTANT PUBLISHER LOOP
-    # ======================================================
-    def _monitor_loop(self, qos_cpu, qos_ram, qos_temp, interval=5):
-        mon = SystemMonitor()
-        prefix = f"sistem/{self.client_id}"
-
-        while self.connected:
-            d = mon.collect_metrics()
-
-            # Trimitem separat pe topicuri
-            self.publish(f"{prefix}/cpu", json.dumps({"cpu": d["cpu"]}), qos=qos_cpu)
-            self.publish(f"{prefix}/mem", json.dumps({"ram": d["ram"]}), qos=qos_ram)
-            self.publish(f"{prefix}/temp", json.dumps({"temperatura": d["temperatura"]}), qos=qos_temp)
-
-            print(f"[→] {prefix}: CPU={d['cpu']}% RAM={d['ram']}% Temp={d['temperatura']}C")
-            time.sleep(interval)
-
-    # ======================================================
-    # RUN MODES
-    # ======================================================
-    def run_publisher(self):
-        print(f"[Publisher] Start monitorizare (Interval: 5s)...")
-        threading.Thread(
-            target=self._monitor_loop,
-            args=(self.qos_cpu, self.qos_ram, self.qos_temp),
-            daemon=True
-        ).start()
-
-        while self.connected:
-            cmd = input()
-            if cmd.lower() in ("exit", "quit"):
-                self.connected = False
-                break
-
-    def run_subscriber(self, topic):
-        self.subscribe(topic)
-        # Main thread ramane activ doar ca sa nu se inchida programul
-        while self.connected:
-            time.sleep(1)

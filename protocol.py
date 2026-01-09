@@ -5,12 +5,13 @@ import struct
 # ======================================================
 # HELPERS
 # ======================================================
-
+#codeaza un sir pentru MQTT: 2 octeti + octetii UTF-8 ai textului
 def encode_string(s: str) -> bytes:
     data = s.encode("utf-8")
     return struct.pack("!H", len(data)) + data
 
-
+# codeaza un numar intreg folosind formatul VarInt MQTT v5
+# Sursa algoritm (adaptat): https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc3901011
 def encode_varint(x: int) -> bytes:
     out = b""
     while True:
@@ -41,7 +42,8 @@ def recv_all(sock, n):
 class ProtocolEncoder:
 
     @staticmethod
-    def encode_connect(client_id="client", keep_alive=60, username=None, password=None):
+    def encode_connect(client_id="client", keep_alive=60, username=None, password=None,
+                       will_topic=None, will_message=None, will_qos=0, will_retain=False):
         # 1. Variable Header
         # Protocol Name (MQTT) + Version (5)
         vh_base = encode_string("MQTT") + b"\x05"
@@ -56,16 +58,33 @@ class ProtocolEncoder:
         if password is not None:
             connect_flags |= 0x40  # Bit 6 = Password Flag
 
+        # Will Flags
+        if will_topic is not None and will_message is not None:
+            connect_flags |= 0x04  # Bit 2 = Will Flag
+            if will_retain:
+                connect_flags |= 0x20  # Bit 5 = Will Retain
+            # Will QoS (bits 4-3)
+            if will_qos == 1:
+                connect_flags |= 0x08
+            elif will_qos == 2:
+                connect_flags |= 0x10
+
         # Adăugăm flags și keep alive
         vh_base += struct.pack("!B", connect_flags)
         vh_base += struct.pack("!H", keep_alive)
 
-        # Properties Length (0)
+        # Properties Length (0) for Variable Header
         vh_base += b"\x00"
 
         # 2. Payload
-        # Ordinea OBLIGATORIE: ClientID -> Will -> Username -> Password
+        # Ordinea OBLIGATORIE: ClientID -> Will Properties -> Will Topic -> Will Payload -> User -> Pass
         payload = encode_string(client_id)
+
+        if will_topic is not None and will_message is not None:
+            # Will Properties (Empty = 0)
+            payload += b"\x00"
+            payload += encode_string(will_topic)
+            payload += encode_string(will_message)
 
         if username is not None:
             payload += encode_string(username)
@@ -76,6 +95,20 @@ class ProtocolEncoder:
         # 3. Asamblare finală
         remaining = len(vh_base) + len(payload)
         return b"\x10" + encode_varint(remaining) + vh_base + payload
+
+    @staticmethod
+    def encode_disconnect(reason_code=0x00):
+        # Fixed Header: 0xE0
+        # Var Header: Reason Code (1 byte) + Properties Length (varint -> 0)
+        # Reason Code 0x00 = Normal disconnection
+        # Total Var Header size = 2 bytes (1 byte RC + 1 byte PropLen 0)
+        
+        vh = struct.pack("!B", reason_code) + b"\x00"
+        return b"\xE0" + encode_varint(len(vh)) + vh
+
+    @staticmethod
+    def encode_pingreq():
+        return b"\xC0\x00"
 
     # ------------------ PUBLISH QoS0 ------------------
     @staticmethod
